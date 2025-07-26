@@ -319,7 +319,6 @@ def generate_vocab_mapping_file(
         unique_ids, counts = masked_ids.unique(return_counts=True)
         batch_token_dict = dict(zip(unique_ids.tolist(), counts.tolist()))
         token_dict.update(batch_token_dict)
-
     # generate the d2t and t2d mapping
     d2t, t2d = process_token_dict_to_mappings(
         token_dict,
