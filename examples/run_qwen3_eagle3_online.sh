@@ -13,8 +13,8 @@ torchrun \
     --draft-model-config "$ROOT_DIR/configs/qwen3-8B-eagle3.json" \
     --train-data-path "$ROOT_DIR/cache/dataset/gsm8k/main/train.jsonl" \
     --output-dir "$ROOT_DIR/outputs/Qwen3-8B-eagle3" \
-    --num-epochs 10 \
-    --batch-size 8 \
+    --num-epochs 20 \
+    --batch-size 16 \
     --learning-rate 1e-4 \
     --max-length 2048 \
     --chat-template qwen \
