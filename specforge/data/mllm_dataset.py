@@ -71,7 +71,6 @@ def get_image_info(image_path, min_pixel, max_pixel, width, height):
     ]
 
     image_input, _ = process_vision_info(messages)
-
     return image_input[0]
 
 class SupervisedDataset(Dataset):
@@ -108,26 +107,33 @@ class SupervisedDataset(Dataset):
 
         if isinstance(image_files, str):
                 image_files = [image_files]
-        images = []
-        
-        for image_file in image_files:
-            if not os.path.exists(image_file):
-                if not image_file.startswith("http"):
-                    image_file = os.path.join(image_folder, image_file)
-            images.append(get_image_info(image_file, self.image_min_pixel, self.image_max_pixel, self.image_resized_w, self.image_resized_h))
+        image_file = image_files[0]
+        if not os.path.exists(image_file):
+            if not image_file.startswith("http"):
+                image_file = os.path.join(image_folder, image_file)
+
+        # Get single image info
+        image = get_image_info(
+            image_file,
+            self.image_min_pixel,
+            self.image_max_pixel,
+            self.image_resized_w,
+            self.image_resized_h,
+        )
+
+        # Convert conversation format
         sources = copy.deepcopy(llava_to_openai(sources['conversations'], is_video=is_video))
         videos = None
-        all_input_ids = [] 
+        all_input_ids = []
         all_labels = []
         all_pixel_values = []
         all_image_grid_thw = []
-        all_second_gird = []
 
+        # Optional system message
         if len(SYSTEM_MESSAGE) > 0:
             system_message = f"{DEFAULT_IM_START_TOKEN}system\n{SYSTEM_MESSAGE}{DEFAULT_IM_END_TOKEN}\n"
             system_message_input_ids = processor.tokenizer(system_message, add_special_tokens=False, return_tensors='pt')['input_ids']
-            system_labels = torch.full_like(system_message_input_ids, IGNORE_INDEX) 
-            
+            system_labels = torch.full_like(system_message_input_ids, IGNORE_INDEX)
             all_input_ids.append(system_message_input_ids.squeeze(0))
             all_labels.append(system_labels.squeeze(0))
 
@@ -138,17 +144,29 @@ class SupervisedDataset(Dataset):
             user_input = f"{DEFAULT_IM_START_TOKEN}{user_input['role']}\n{user_input['content']}{DEFAULT_IM_END_TOKEN}\n{DEFAULT_IM_START_TOKEN}{gpt_response['role']}\n"
             gpt_response = f"{gpt_response['content']}{DEFAULT_IM_END_TOKEN}\n"
 
+            # If image token is in user input, run multimodal processor
             if DEFAULT_IMAGE_TOKEN in user_input:
-                inputs = processor(text=[user_input], images=images, videos=videos, padding=False, do_resize=False, return_tensors='pt')
+                inputs = processor(
+                    text=[user_input],
+                    images=[image],
+                    videos=videos,
+                    padding=False,
+                    do_resize=False,
+                    return_tensors='pt'
+                )
                 prompt_input_ids = inputs['input_ids']
                 all_pixel_values.append(inputs[pixel_key])
                 all_image_grid_thw.append(inputs[grid_key])
-            
-            response_input_ids = processor.tokenizer(gpt_response, add_special_tokens=False, padding=False, return_tensors='pt')['input_ids']
+            else:
+                # Pure text input (unlikely in multimodal, but handled anyway)
+                prompt_input_ids = processor.tokenizer(user_input, add_special_tokens=False, return_tensors='pt')['input_ids']
+
+            response_input_ids = processor.tokenizer(gpt_response, add_special_tokens=False, return_tensors='pt')['input_ids']
+
             input_ids = torch.cat([prompt_input_ids, response_input_ids], dim=1).squeeze(0)
             labels = torch.cat(
                 [
-                    torch.tensor([IGNORE_INDEX] * len(prompt_input_ids[0])),  
+                    torch.tensor([IGNORE_INDEX] * prompt_input_ids.shape[1]),
                     response_input_ids.squeeze(0),
                 ],
                 dim=0,
@@ -159,7 +177,6 @@ class SupervisedDataset(Dataset):
 
         input_ids = torch.cat(all_input_ids, dim=0).to(torch.long)
         labels = torch.cat(all_labels, dim=0).to(torch.long)
-
         attention_mask = (input_ids > -1000000).to(torch.long)
 
         data_dict = dict(
@@ -167,27 +184,32 @@ class SupervisedDataset(Dataset):
             attention_mask=attention_mask,
             labels=labels,
         )
-        if pixel_key and grid_key:
+
+        if pixel_key and grid_key and all_pixel_values:
             pixel_values = torch.cat(all_pixel_values, dim=0)
             image_thw = torch.cat(all_image_grid_thw, dim=0)
             data_dict[pixel_key] = pixel_values
-            data_dict[grid_key] = image_thw
+            data_dict[grid_key] = image_thw[0]
 
-        if len(all_second_gird) > 0:
-            second_gird = all_second_gird
-            data_dict["second_per_grid_ts"] = second_gird
-        
         return data_dict
-
     
 if __name__ == "__main__":
     from transformers import AutoProcessor
+    from specforge.hf_model import Qwen2_5_VLForConditionalGeneration
     processor = AutoProcessor.from_pretrained("/home/wulin/llm/SpecForge/cache/model/Qwen2.5-VL-7B-Instruct")
+    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        "/home/wulin/llm/SpecForge/cache/model/Qwen2.5-VL-7B-Instruct", torch_dtype="auto", device_map="auto"
+    )
     data_path = "/home/wulin/llm/SpecForge/cache/dataset/llava_sft/train_10000.json"
     image_folder = "/home/wulin/llm/SpecForge/cache/dataset/llava_sft/images"
     dataset = SupervisedDataset(data_path=data_path, image_folder=image_folder,processor=processor)
-    print(dataset[0])
-    
+    inputs = {k: v.unsqueeze(0).to("cuda") for k, v in dataset[0].items()}
 
-
-
+    outputs = model(
+            input_ids = inputs["input_ids"],
+            attention_mask =  inputs["attention_mask"],
+            pixel_values = inputs["pixel_values"],
+            image_grid_thw = inputs["image_grid_thw"],
+            output_hidden_states=True,
+            use_cache=False,
+        )
