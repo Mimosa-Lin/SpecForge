@@ -94,6 +94,7 @@ class SupervisedDataset(Dataset):
         return len(self.list_data_dict)
 
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
+        processor = copy.deepcopy(self.processor)
         sources = self.list_data_dict[i]
         is_video = False
         grid_key = "image_grid_thw"
@@ -178,11 +179,12 @@ class SupervisedDataset(Dataset):
         input_ids = torch.cat(all_input_ids, dim=0).to(torch.long)
         labels = torch.cat(all_labels, dim=0).to(torch.long)
         attention_mask = (input_ids > -1000000).to(torch.long)
-
+        loss_mask = (labels != -100).long()
         data_dict = dict(
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
+            loss_mask=loss_mask
         )
 
         if pixel_key and grid_key and all_pixel_values:
@@ -190,26 +192,89 @@ class SupervisedDataset(Dataset):
             image_thw = torch.cat(all_image_grid_thw, dim=0)
             data_dict[pixel_key] = pixel_values
             data_dict[grid_key] = image_thw[0]
-
+        for k in data_dict.keys():
+            data_dict[k] = data_dict[k].unsqueeze(0)
         return data_dict
     
+class SupervisedTextOnlyDataset(Dataset):
+    def __init__(
+        self,
+        data_path: str | list,
+        processor: transformers.ProcessorMixin,
+        padding=True,
+    ):
+        super().__init__()
+        if isinstance(data_path, str):
+            with open(data_path, 'r') as f:
+                self.list_data_dict = json.load(f)
+        else:
+            self.list_data_dict = data_path 
+        self.tokenizer = processor.tokenizer
+        self.padding = padding
+
+    def __len__(self):
+        return len(self.list_data_dict)
+
+    def __getitem__(self, i):
+        sources = self.list_data_dict[i]
+        tokenizer = copy.deepcopy(self.tokenizer)
+        conversations = llava_to_openai(sources["conversations"], is_video=False)
+
+        all_input_ids = []
+        all_labels = []
+
+        # Optional system message
+        if SYSTEM_MESSAGE:
+            system_text = f"{DEFAULT_IM_START_TOKEN}system\n{SYSTEM_MESSAGE}{DEFAULT_IM_END_TOKEN}\n"
+            system_ids = self.tokenizer(system_text, add_special_tokens=False, return_tensors='pt')['input_ids'].squeeze(0)
+            system_labels = torch.full_like(system_ids, IGNORE_INDEX)
+            all_input_ids.append(system_ids)
+            all_labels.append(system_labels)
+
+        # Tokenize conversation
+        for j in range(0, len(conversations), 2):
+            user_msg = conversations[j]
+            gpt_msg = conversations[j + 1]
+
+            user_text = f"{DEFAULT_IM_START_TOKEN}{user_msg['role']}\n{user_msg['content']}{DEFAULT_IM_END_TOKEN}\n"
+            gpt_text = f"{DEFAULT_IM_START_TOKEN}{gpt_msg['role']}\n{gpt_msg['content']}{DEFAULT_IM_END_TOKEN}\n"
+
+            user_ids = self.tokenizer(user_text, add_special_tokens=False, return_tensors='pt')['input_ids'].squeeze(0)
+            gpt_ids = self.tokenizer(gpt_text, add_special_tokens=False, return_tensors='pt')['input_ids'].squeeze(0)
+
+            labels = torch.cat([
+                torch.full_like(user_ids, IGNORE_INDEX),
+                gpt_ids
+            ], dim=0)
+
+            input_ids = torch.cat([user_ids, gpt_ids], dim=0)
+
+            all_input_ids.append(input_ids)
+            all_labels.append(labels)
+
+        input_ids = torch.cat(all_input_ids, dim=0)
+        labels = torch.cat(all_labels, dim=0)
+        attention_mask = (input_ids != self.tokenizer.pad_token_id).long()
+        loss_mask = (labels != IGNORE_INDEX).long()
+
+        return {
+            "input_ids": input_ids.unsqueeze(0),
+            "labels": labels.unsqueeze(0),
+            "attention_mask": attention_mask.unsqueeze(0),
+            "loss_mask": loss_mask.unsqueeze(0),
+        }
+
+
 if __name__ == "__main__":
     from transformers import AutoProcessor
     from specforge.hf_model import Qwen2_5_VLForConditionalGeneration
     processor = AutoProcessor.from_pretrained("/home/wulin/llm/SpecForge/cache/model/Qwen2.5-VL-7B-Instruct")
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        "/home/wulin/llm/SpecForge/cache/model/Qwen2.5-VL-7B-Instruct", torch_dtype="auto", device_map="auto"
-    )
+    # model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+    #     "/home/wulin/llm/SpecForge/cache/model/Qwen2.5-VL-7B-Instruct", torch_dtype="auto", device_map="auto"
+    # )
     data_path = "/home/wulin/llm/SpecForge/cache/dataset/llava_sft/train_10000.json"
     image_folder = "/home/wulin/llm/SpecForge/cache/dataset/llava_sft/images"
     dataset = SupervisedDataset(data_path=data_path, image_folder=image_folder,processor=processor)
     inputs = {k: v.unsqueeze(0).to("cuda") for k, v in dataset[0].items()}
+    print(inputs)
 
-    outputs = model(
-            input_ids = inputs["input_ids"],
-            attention_mask =  inputs["attention_mask"],
-            pixel_values = inputs["pixel_values"],
-            image_grid_thw = inputs["image_grid_thw"],
-            output_hidden_states=True,
-            use_cache=False,
-        )

@@ -40,7 +40,7 @@ def parse_args():
     parser.add_argument(
         "--dataset",
         type=str,
-        choices=["gsm8k"],
+        choices=["gsm8k", "llava_sft"],
         help="The demo dataset to quickly run the training for speculative decoding",
     )
     parser.add_argument(
@@ -77,25 +77,27 @@ def main():
     if args.dataset == "gsm8k":
         data = pd.read_parquet(args.data_path)
         data = data[args.start_id::args.split]
-    llm = sgl.Engine(model_path=args.model_path)
-    sampling_params = {"temperature": 0.0, "top_p": 1.0, "max_new_tokens": 2048}
-    batch_size = 32
-    questions = [row["question"].strip() for _, row in data.iterrows()]
-    with open(args.output_path, "w", encoding="utf-8") as fout:
-        total_batches = math.ceil(len(questions) / batch_size)
-        for i in tqdm(range(0, len(questions), batch_size), total=total_batches):
-            batch = questions[i:i + batch_size]
-            outputs = llm.generate(batch, sampling_params)
+        llm = sgl.Engine(model_path=args.model_path)
+        sampling_params = {"temperature": 0.0, "top_p": 1.0, "max_new_tokens": 2048}
+        batch_size = 32
+        questions = [row["question"].strip() for _, row in data.iterrows()]
+        with open(args.output_path, "w", encoding="utf-8") as fout:
+            total_batches = math.ceil(len(questions) / batch_size)
+            for i in tqdm(range(0, len(questions), batch_size), total=total_batches):
+                batch = questions[i:i + batch_size]
+                outputs = llm.generate(batch, sampling_params)
 
-            for j, output in enumerate(outputs):
-                item = {
-                    "id": i + j,
-                    "conversations": [
-                        {"role": "user", "content": batch[j]},
-                        {"role": "assistant", "content": output["text"]},
-                    ]
-                }
-                fout.write(json.dumps(item, ensure_ascii=False) + "\n")
+                for j, output in enumerate(outputs):
+                    item = {
+                        "id": i + j,
+                        "conversations": [
+                            {"role": "user", "content": batch[j]},
+                            {"role": "assistant", "content": output["text"]},
+                        ]
+                    }
+                    fout.write(json.dumps(item, ensure_ascii=False) + "\n")
+    
+    
 
 if __name__ == "__main__":
     main()

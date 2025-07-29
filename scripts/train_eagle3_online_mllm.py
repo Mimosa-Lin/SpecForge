@@ -1,7 +1,7 @@
 import argparse
 import hashlib
 import os
-
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import torch
 import torch.distributed as dist
 import wandb
@@ -10,7 +10,8 @@ from datasets import load_dataset
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import MixedPrecision, ShardingStrategy, StateDictType
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor ,LlavaForConditionalGeneration
+from specforge.hf_model import Qwen2_5_VLForConditionalGeneration
 
 from specforge import (
     AutoDistributedTargetModel,
@@ -22,6 +23,10 @@ from specforge.data import (
     build_eagle3_dataset,
     generate_vocab_mapping_file,
     prepare_dp_dataloaders,
+    SupervisedDataset,
+    build_loader,
+    build_llava_dataset
+
 )
 from specforge.distributed import destroy_distributed, get_dp_group, init_distributed
 from specforge.lr_scheduler import CosineAnnealingWarmupLR
@@ -42,7 +47,8 @@ def parse_args():
     )
 
     # add training-related arguments
-    parser.add_argument("--train-data-path", type=str, required=True)
+    parser.add_argument("--train_json_path", type=str, required=True)
+    parser.add_argument("--train_images_path", type=str, required=True)
     parser.add_argument("--eval-data-path", type=str, default=None)
     parser.add_argument("--num-epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -125,7 +131,7 @@ def main():
         ).eval()
     else:
         target_model = (
-            AutoModelForCausalLM.from_pretrained(
+            LlavaForConditionalGeneration.from_pretrained(
                 pretrained_model_name_or_path=args.target_model_path,
                 torch_dtype=torch.bfloat16,
             )
@@ -153,29 +159,34 @@ def main():
 
     # build dataloaders
     tokenizer = AutoTokenizer.from_pretrained(args.target_model_path)
-
+    processor = AutoProcessor.from_pretrained(args.target_model_path)
     # convert to dataloader
-    cache_key = hashlib.md5(args.train_data_path.encode()).hexdigest()
-    train_dataset = load_dataset("json", data_files=args.train_data_path)["train"]
-
+    
+    cache_key = hashlib.md5(os.path.dirname(args.train_json_path).encode()).hexdigest()
+    # train_dataset = load_dataset("json", data_files=args.train_data_path)["train"]
+    # text_only_dataset = SupervisedTextOnlyDataset(data_path=args.train_json_path, processor=processor)
+    # train_dataset = SupervisedDataset(data_path=args.train_json_path, image_folder=args.train_images_path, processor=processor)
+    train_dataset = build_llava_dataset(json_path=args.train_json_path, image_dir=args.train_images_path, processor=processor)
+    train_dataset.set_format(type="torch")
     with rank_0_priority():
-        train_eagle3_dataset = build_eagle3_dataset(
-            dataset=train_dataset,
-            tokenizer=tokenizer,
-            chat_template=args.chat_template,
-            max_length=args.max_length,
-            cache_dir=os.path.join(args.cache_dir, "processed_dataset"),
-            cache_key=cache_key,
-        )
+        # train_eagle3_dataset = build_eagle3_dataset(
+        #     dataset=train_dataset,
+        #     tokenizer=tokenizer,
+        #     chat_template=args.chat_template,
+        #     max_length=args.max_length,
+        #     cache_dir=os.path.join(args.cache_dir, "processed_dataset"),
+        #     cache_key=cache_key,
+        # )
         vocab_mapping_path = generate_vocab_mapping_file(
-            dataset=train_eagle3_dataset,
+            dataset=train_dataset,
             target_vocab_size=draft_model_config.vocab_size,
             draft_vocab_size=draft_model_config.draft_vocab_size,
             cache_dir=os.path.join(args.cache_dir, "vocab_mapping"),
             cache_key=cache_key,
         )
+    # train_dataloader = build_loader(train_dataset, args.batch_size, num_workers=4)
     train_dataloader = prepare_dp_dataloaders(
-        train_eagle3_dataset,
+        train_dataset,
         args.batch_size,
         num_workers=4,
         shuffle=True,

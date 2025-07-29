@@ -30,6 +30,7 @@ import torch
 from datasets import Dataset as HFDataset
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer
+from torch.utils.data import DataLoader
 
 from specforge.utils import padding
 
@@ -281,27 +282,80 @@ def build_offline_eagle3_dataset(
 # ==============================
 # Vocab Mapping
 # ==============================
+# def generate_vocab_mapping_file(
+#     dataset: HFDataset,
+#     target_vocab_size: int,
+#     draft_vocab_size: int,
+#     cache_dir: str = "./cache/vocab_mapping",
+#     cache_key: str = "vocab_mapping",
+# ) -> str:
+#     """
+#     Generate a vocab mapping file for the dataset.
+
+#     Args:
+#         dataset: The dataset to process.
+#         target_vocab_size: The target vocabulary size.
+#         draft_vocab_size: The draft vocabulary size.
+#         cache_dir: The directory to use for caching the vocab mapping file.
+#         cache_key: The key to use for caching the vocab mapping file.
+
+#     Returns:
+#         The path to the vocab mapping file.
+#     """
+#     # prepare cache direcotory
+#     os.makedirs(cache_dir, exist_ok=True)
+#     vocab_mapping_path = os.path.join(cache_dir, f"{cache_key}.pt")
+
+#     if os.path.exists(vocab_mapping_path):
+#         print(f"Loading vocab mapping from the cached file at: {vocab_mapping_path}")
+#         return vocab_mapping_path
+
+#     # we first count the frequency of effectiev tokens in the dataset
+#     token_dict = Counter()
+#     for item in tqdm(dataset, desc="Counting tokens for vocab mapping"):
+#         input_ids = item["input_ids"]
+#         loss_mask = item["loss_mask"]
+#         masked_ids = input_ids[loss_mask == 1]
+#         unique_ids, counts = masked_ids.unique(return_counts=True)
+#         batch_token_dict = dict(zip(unique_ids.tolist(), counts.tolist()))
+#         token_dict.update(batch_token_dict)
+#     # generate the d2t and t2d mapping
+#     d2t, t2d = process_token_dict_to_mappings(
+#         token_dict,
+#         draft_vocab_size,
+#         target_vocab_size,
+#     )
+
+#     vocab_mapping = {
+#         "d2t": d2t,
+#         "t2d": t2d,
+#     }
+#     torch.save(vocab_mapping, vocab_mapping_path)
+#     print(f"Saved vocab mapping to: {vocab_mapping_path}")
+#     return vocab_mapping_path
+
 def generate_vocab_mapping_file(
-    dataset: HFDataset,
+    dataset,
     target_vocab_size: int,
     draft_vocab_size: int,
     cache_dir: str = "./cache/vocab_mapping",
     cache_key: str = "vocab_mapping",
+    batch_size: int = 32,
 ) -> str:
     """
     Generate a vocab mapping file for the dataset.
 
     Args:
-        dataset: The dataset to process.
+        dataset: The dataset to process. Should support torch format.
         target_vocab_size: The target vocabulary size.
         draft_vocab_size: The draft vocabulary size.
         cache_dir: The directory to use for caching the vocab mapping file.
         cache_key: The key to use for caching the vocab mapping file.
+        batch_size: Batch size used during token counting.
 
     Returns:
         The path to the vocab mapping file.
     """
-    # prepare cache direcotory
     os.makedirs(cache_dir, exist_ok=True)
     vocab_mapping_path = os.path.join(cache_dir, f"{cache_key}.pt")
 
@@ -309,16 +363,12 @@ def generate_vocab_mapping_file(
         print(f"Loading vocab mapping from the cached file at: {vocab_mapping_path}")
         return vocab_mapping_path
 
-    # we first count the frequency of effectiev tokens in the dataset
-    token_dict = Counter()
-    for item in tqdm(dataset, desc="Counting tokens for vocab mapping"):
-        input_ids = item["input_ids"]
-        loss_mask = item["loss_mask"]
-        masked_ids = input_ids[loss_mask == 1]
-        unique_ids, counts = masked_ids.unique(return_counts=True)
-        batch_token_dict = dict(zip(unique_ids.tolist(), counts.tolist()))
-        token_dict.update(batch_token_dict)
-    # generate the d2t and t2d mapping
+    # Efficient token counting
+    token_freq = count_tokens_batched(dataset, batch_size=batch_size, vocab_size=target_vocab_size)
+    nonzero_indices = (token_freq > 0).nonzero(as_tuple=True)[0]  # shape: [N]
+    token_dict = Counter({int(idx): int(token_freq[idx]) for idx in nonzero_indices})
+
+    # Generate mapping
     d2t, t2d = process_token_dict_to_mappings(
         token_dict,
         draft_vocab_size,
@@ -332,6 +382,50 @@ def generate_vocab_mapping_file(
     torch.save(vocab_mapping, vocab_mapping_path)
     print(f"Saved vocab mapping to: {vocab_mapping_path}")
     return vocab_mapping_path
+
+
+def collate_with_padding(batch):
+
+    from torch.nn.utils.rnn import pad_sequence
+    """
+    Pad input_ids and loss_mask in a batch to the same length.
+    """
+    for item in batch:
+        if type(item) == list:
+            print(batch)
+
+    input_ids = [item["input_ids"].squeeze(0) for item in batch]
+    loss_mask = [item["loss_mask"].squeeze(0) for item in batch]
+
+    input_ids_padded = pad_sequence(input_ids, batch_first=True, padding_value=0)
+    loss_mask_padded = pad_sequence(loss_mask, batch_first=True, padding_value=0)
+
+    return {
+        "input_ids": input_ids_padded,
+        "loss_mask": loss_mask_padded,
+    }
+
+def count_tokens_batched(dataset, batch_size=32, vocab_size=None) -> torch.Tensor:
+    """
+    Count token frequencies in batches using torch DataLoader.
+
+    Args:
+        dataset: Torch-compatible dataset.
+        batch_size: Batch size for loading.
+        vocab_size: Total vocabulary size (for bincount).
+
+    Returns:
+        token_freq: Tensor of shape (vocab_size,) with frequency counts.
+    """
+    token_freq = torch.zeros(vocab_size, dtype=torch.long)
+    loader = DataLoader(dataset, batch_size=batch_size, collate_fn=collate_with_padding, num_workers=16)
+    for batch in tqdm(loader, desc="Counting tokens for vocab mapping"):
+        input_ids = batch["input_ids"]  # shape: (B, L)
+        loss_mask = batch["loss_mask"]  # shape: (B, L)
+        masked_ids = input_ids[loss_mask == 1]  # shape: (num_masked,)
+        token_freq += torch.bincount(masked_ids, minlength=vocab_size)
+
+    return token_freq
 
 
 def process_token_dict_to_mappings(
