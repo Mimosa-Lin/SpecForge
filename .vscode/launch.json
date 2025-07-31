@@ -11,7 +11,8 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "python": "/var/conda/envs/eagle3/bin/python",
-            "justMyCode": false
+            "justMyCode": false,
+            "cwd": "${workspaceFolder}"
         },
     ]
 }
