@@ -1,9 +1,9 @@
 export CUDA_VISIBLE_DEVICES=0
 
 python3 -m sglang.launch_server \
-    --model cache/model/Qwen3-8B  \
+    --model cache/model/llava-v1.5-7b  \
     --speculative-algorithm EAGLE3 \
-    --speculative-draft-model-path outputs/Qwen3-8B-eagle3/epoch_19 \
+    --speculative-draft-model-path outputs/llava-eagle3/epoch_19 \
     --speculative-num-steps 3 \
     --speculative-eagle-topk 1 \
     --speculative-num-draft-tokens 4 \

@@ -86,7 +86,7 @@ from transformers import AutoProcessor
 
 #     return dataloader
 
-def build_llava_dataset(json_path, image_dir, processor):
+def build_llava_dataset(json_path, image_dir, processor, max_length):
     dataset = load_dataset("json", data_files=json_path, split="train")
     def preprocess(example):
         # Load image
@@ -129,7 +129,14 @@ def build_llava_dataset(json_path, image_dir, processor):
         chat_text = processor.apply_chat_template(messages, tokenize=False)
         text = copy.deepcopy(chat_text)
         # Preprocess image + tokenize
-        processed = processor(images=image, text=chat_text, return_tensors="pt", padding=True, return_offsets_mapping=True)
+        processed = processor(
+            images=image, 
+            text=chat_text, 
+            return_tensors="pt", 
+            padding=True, 
+            return_offsets_mapping=True,
+            max_length=max_length
+            )
         # Prepare labels
         input_ids = processed["input_ids"][0]
         labels = input_ids.clone()
@@ -164,7 +171,13 @@ def build_llava_dataset(json_path, image_dir, processor):
             "loss_mask": loss_mask.unsqueeze(0)
         }
 
-    dataset = dataset.map(preprocess, remove_columns=dataset.column_names)
+    # dataset = dataset.map(preprocess, remove_columns=dataset.column_names)
+    dataset = dataset.map(
+        preprocess,
+        remove_columns=dataset.column_names,
+        num_proc=32,
+        desc="Preprocessing"
+    )
     return dataset
 
 def build_loader(dataset, batch_size, num_workers):

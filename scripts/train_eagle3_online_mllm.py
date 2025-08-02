@@ -18,11 +18,12 @@ from specforge import (
     AutoDraftModelConfig,
     AutoEagle3DraftModel,
     OnlineEagle3Model,
+    OnlineEagle3mllm,
 )
 from specforge.data import (
     build_eagle3_dataset,
     generate_vocab_mapping_file,
-    prepare_dp_dataloaders,
+    prepare_dp_mllm_dataloaders,
     SupervisedDataset,
     build_loader,
     build_llava_dataset
@@ -166,17 +167,14 @@ def main():
     # train_dataset = load_dataset("json", data_files=args.train_data_path)["train"]
     # text_only_dataset = SupervisedTextOnlyDataset(data_path=args.train_json_path, processor=processor)
     # train_dataset = SupervisedDataset(data_path=args.train_json_path, image_folder=args.train_images_path, processor=processor)
-    train_dataset = build_llava_dataset(json_path=args.train_json_path, image_dir=args.train_images_path, processor=processor)
-    train_dataset.set_format(type="torch")
+    
     with rank_0_priority():
-        # train_eagle3_dataset = build_eagle3_dataset(
-        #     dataset=train_dataset,
-        #     tokenizer=tokenizer,
-        #     chat_template=args.chat_template,
-        #     max_length=args.max_length,
-        #     cache_dir=os.path.join(args.cache_dir, "processed_dataset"),
-        #     cache_key=cache_key,
-        # )
+        train_dataset = build_llava_dataset(json_path=args.train_json_path, 
+                                            image_dir=args.train_images_path, 
+                                            processor=processor,
+                                            max_length=args.max_length
+                                            )
+        train_dataset.set_format(type="torch")
         vocab_mapping_path = generate_vocab_mapping_file(
             dataset=train_dataset,
             target_vocab_size=draft_model_config.vocab_size,
@@ -185,7 +183,7 @@ def main():
             cache_key=cache_key,
         )
     # train_dataloader = build_loader(train_dataset, args.batch_size, num_workers=4)
-    train_dataloader = prepare_dp_dataloaders(
+    train_dataloader = prepare_dp_mllm_dataloaders(
         train_dataset,
         args.batch_size,
         num_workers=4,
@@ -206,7 +204,7 @@ def main():
             args.chat_template,
             args.max_length,
         )
-        eval_dataloader = prepare_dp_dataloaders(
+        eval_dataloader = prepare_dp_mllm_dataloaders(
             eval_eagle3_dataset,
             args.batch_size,
             num_workers=4,
@@ -217,7 +215,7 @@ def main():
 
     # build Eagle3 model
     # broadcast draft model
-    eagle3_model = OnlineEagle3Model(
+    eagle3_model = OnlineEagle3mllm(
         target_model=target_model,
         draft_model=draft_model,
     )
@@ -283,6 +281,7 @@ def main():
             optimizer.zero_grad()
             plosses, _, acces = eagle3_model(
                 input_ids=data["input_ids"].cuda(),
+                pixel_values = data["pixel_values"].cuda(),
                 attention_mask=data["attention_mask"].cuda(),
                 loss_mask=data["loss_mask"].cuda(),
             )
@@ -336,6 +335,7 @@ def main():
             for data in tqdm(eval_dataloader, desc=f"Evaluating Epoch {epoch}"):
                 plosses, _, acces = eagle3_model(
                     input_ids=data["input_ids"].cuda(),
+                    pixel_values = data["pixel_values"].cuda(),
                     attention_mask=data["attention_mask"].cuda(),
                     loss_mask=data["loss_mask"].cuda(),
                 )
